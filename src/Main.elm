@@ -1,6 +1,6 @@
 module Main exposing (main)
 
-import Html exposing (Html, div, text)
+import Html exposing (Html, div, text, span, button)
 import Html.Attributes exposing (class)
 
 
@@ -13,8 +13,8 @@ type alias Map a =
 
 
 type Ambiguation a
-    = Or a (Ambiguation a)
-    | Of a
+    = Of a
+    | Or a (Ambiguation a)
 
 
 {-| Map a function over all members.
@@ -22,13 +22,19 @@ type Ambiguation a
 map_ambiguation : (a -> b) -> Ambiguation a -> Ambiguation b
 map_ambiguation fu ambi =
     case ambi of
+        Of x ->
+            Of (fu x)
         Or x y ->
             Or (fu x) (map_ambiguation fu y)
 
+fold_ambiguation : ( a -> b -> b) -> b -> Ambiguation a -> b
+fold_ambiguation f acc ambi =
+    case ambi of
         Of x ->
-            Of (fu x)
-
-
+            f x acc
+        Or x rest ->
+            fold_ambiguation f ( f x acc ) rest
+                   
 
 {- The CursorTree is a zipper with three dimensions, over a single type.
    By analogy, think of a cursor in a text editor, plus a hierarchy dimension,
@@ -104,55 +110,16 @@ map_ambiguation fu ambi =
 
 type CursorTree a
     = CursorTree
+        { editing : Bool }
         { composition : Composition a
         , sequence : Sequence a
         , variation : Variation a
-        , editing : Bool
         }
 
 
 type Locus
     = Locus (List String)
 
-
-
--- Edges
-
-
-type Edge a
-    = RootEdge
-    | Composed { windowing : Bool }
-    | LeafEdge
-    | UndecidedEdge
-    | Decided { windowing : Bool }
-    | ImpossibleEdge
-    | Left
-    | Right
-    | OutsideEdge
-    | Before a
-    | After a
-
-
-type alias Fold a acc =
-    { composition : 
-        { root : acc
-        , up : { windowing : Bool } -> Map acc
-        , down : { windowing : Bool } -> Map acc
-        , undecide : { possibilities: Ambiguation Possibility} -> Map acc
-        , leaf : acc
-        , merge : Map acc
-        }  
-    , variation :
-        { init : acc
-        , succ : Map acc
-        , merge : acc -> Map acc
-        }
-    , sequence:
-        { init : acc
-        , succ : a -> Map acc
-        , merge : acc -> Map acc
-        }
-    }
 
 
 
@@ -168,9 +135,9 @@ type alias Composition a =
 type Up a
     = Root
     | Up
+        { windowing : Bool }
         { variation : Variation a
         , sequence : Sequence a
-        , windowing : Bool
         , succ : Up a
         }
 
@@ -178,19 +145,19 @@ type Up a
 type Down a
     = Leaf
     | Undecided
-        (Ambiguation Possibility )
-    | Down
-        { windowing : Bool
+        { windowing : Bool }
+        ( Ambiguation ( Possibility a ) )
+    | Decided
+        { windowing : Bool }
+        { sequence : Sequence a
         , variation : Variation a
-        , sequence : Sequence a
         , succ : Down a
         }
 
-type alias Possibility =
-    { windowing : Bool
-            , sequence : Sequence a
-            , succ : Down a
-            }
+type alias Possibility a =
+    { sequence : Sequence a
+    , succ : Down a
+    }
 
 
 -- Variation (alternative Downs)
@@ -205,8 +172,8 @@ type alias Variation a =
 type Variant a
     = Impossible
     | Variant
-        { down : Down a
-        , sequence : Sequence a
+        { sequence : Sequence a
+        , down : Down a
         , succ : Variant a
         }
 
@@ -237,12 +204,11 @@ type Next a
 {-| map each datum `a` in the zipper.
 -}
 map : (a -> b) -> CursorTree a -> CursorTree b
-map fu (CursorTree z) =
-    CursorTree
-        { z
-            | composition = map_composition fu z.composition
-            , sequence = map_sequence fu z.sequence
-            , variation = map_variation fu z.variation
+map fu (CursorTree parameters z) =
+    CursorTree parameters
+        { composition = map_composition fu z.composition
+        , sequence = map_sequence fu z.sequence
+        , variation = map_variation fu z.variation
         }
 
 
@@ -273,12 +239,12 @@ map_up fu p =
         Root ->
             Root
 
-        Up x ->
+        Up parameters u ->
             Up
-                { up = map_up fu x.up
-                , windowing = x.windowing
-                , sequence = map_sequence fu x.sequence
-                , variation = map_variation fu x.variation
+                parameters
+                { succ = map_up fu u.succ
+                , sequence = map_sequence fu u.sequence
+                , variation = map_variation fu u.variation
                 }
 
 
@@ -288,23 +254,21 @@ map_down fu k =
         Leaf ->
             Leaf
 
-        Undecided aa ->
-            aa
-                |> map_ambiguation
-                    (\a ->
-                        { down = map_down fu a.down
-                        , windowing = a.windowing
-                        , sequence = map_sequence fu a.sequence
+        Undecided parameters possibilities ->
+            Undecided
+                parameters <|
+                map_ambiguation
+                    ( \possibility ->
+                        { succ = map_down fu possibility.succ
+                        , sequence = map_sequence fu possibility.sequence
                         }
                     )
-                |> Variants
-
-        Down x ->
-            Down
-                { down = map_down fu x.down
-                , windowing = x.windowing
-                , sequence = map_sequence fu x.sequence
-                , variation = map_variation fu x.variation
+                    possibilities
+        Decided parameters d ->
+            Decided parameters
+                { succ = map_down fu d.succ
+                , sequence = map_sequence fu d.sequence
+                , variation = map_variation fu d.variation
                 }
 
 
@@ -337,62 +301,58 @@ map_next fu p =
 
 empty : CursorTree a
 empty =
-    CursorTree null
+    CursorTree { editing = False } null
 
 
 null =
     { composition = { up = Root, down = Leaf }
     , sequence = { after = Outside, before = Outside }
     , variation = { left = Impossible, right = Impossible }
-    , editing = False
     }
 
 
 up : CursorTree a -> Maybe (CursorTree a)
-up (CursorTree z) =
+up (CursorTree parameters z) =
     case z.composition.up of
         Root ->
             Nothing
 
-        Up u ->
-            (CursorTree >> Just)
-                { z
-                    | composition =
-                        { up = u.up
+        Up u_parameters u ->
+            (CursorTree parameters >> Just)
+                { composition =
+                        { up = u.succ
                         , down =
-                            Down
-                                { down = z.composition.down
+                            Decided u_parameters
+                                { succ = z.composition.down
                                 , sequence = z.sequence
                                 , variation = z.variation
-                                , windowing = u.windowing
                                 }
                         }
-                    , sequence = u.sequence
-                    , variation = u.variation
+                , sequence = u.sequence
+                , variation = u.variation
                 }
 
 
 down : CursorTree a -> Maybe (CursorTree a)
-down (CursorTree z) =
+down (CursorTree parameters z) =
     case z.composition.down of
         Leaf ->
             Nothing
 
-        Variants aa ->
+        Undecided u_parameters possibilities ->
             Nothing
 
-        Down d ->
-            (CursorTree >> Just)
+        Decided d_parameters d ->
+            (CursorTree parameters >> Just)
                 { z
                     | composition =
                         { up =
-                            Up
-                                { up = z.composition.up
+                            Up d_parameters
+                                { succ = z.composition.up
                                 , sequence = z.sequence
                                 , variation = z.variation
-                                , windowing = d.windowing
                                 }
-                        , down = d.down
+                        , down = d.succ
                         }
                     , sequence = d.sequence
                     , variation = d.variation
@@ -400,13 +360,13 @@ down (CursorTree z) =
 
 
 before : CursorTree a -> Maybe (CursorTree a)
-before (CursorTree z) =
+before (CursorTree parameters z ) =
     case z.sequence.before of
         Outside ->
             Nothing
 
         Next a p ->
-            (CursorTree >> Just)
+            (CursorTree parameters >> Just)
                 { z
                     | composition = { up = z.composition.up, down = p.down }
                     , sequence =
@@ -417,18 +377,17 @@ before (CursorTree z) =
                                 , succ = z.sequence.after
                                 }
                         }
-                    , variation = p.variation
                 }
 
 
 after : CursorTree a -> Maybe (CursorTree a)
-after (CursorTree z) =
+after (CursorTree parameters z) =
     case z.sequence.after of
         Outside ->
             Nothing
 
         Next a n ->
-            (CursorTree >> Just)
+            (CursorTree parameters >> Just)
                 { z
                     | composition = { up = z.composition.up, down = n.down }
                     , sequence =
@@ -439,44 +398,41 @@ after (CursorTree z) =
                                 , succ = z.sequence.before
                                 }
                         }
-                    , variation = n.variation
                 }
 
 
 left : CursorTree a -> Maybe (CursorTree a)
-left (CursorTree z) =
+left (CursorTree parameters z) =
     case z.variation.left of
         Impossible ->
             Nothing
 
         Variant l ->
-            (CursorTree >> Just)
-                { z
-                    | composition =
-                        { up = z.composition.up, down = l.down }
-                    , sequence = l.sequence
-                    , variation =
-                        { left = l.succ
-                        , right =
-                            Variant
-                                { down = z.composition.down
-                                , sequence = z.sequence
-                                , succ = z.variation.right
-                                }
-                        }
+            (CursorTree parameters >> Just)
+                { composition =
+                      { up = z.composition.up, down = l.down }
+                , sequence = l.sequence
+                , variation =
+                      { left = l.succ
+                      , right =
+                          Variant
+                          { down = z.composition.down
+                          , sequence = z.sequence
+                          , succ = z.variation.right
+                          }
+                      }
                 }
 
 
 right : CursorTree a -> Maybe (CursorTree a)
-right (CursorTree z) =
+right (CursorTree parameters z) =
     case z.variation.right of
         Impossible ->
             Nothing
 
         Variant r ->
-            (CursorTree >> Just)
-                { z
-                    | composition =
+            (CursorTree parameters >> Just)
+                    { composition =
                         { down = r.down, up = z.composition.up }
                     , sequence = r.sequence
                     , variation =
@@ -492,16 +448,15 @@ right (CursorTree z) =
 
 
 insert_up : Map (CursorTree a)
-insert_up (CursorTree z) =
-    CursorTree
-        { z
-            | composition =
+insert_up (CursorTree parameters z) =
+    CursorTree parameters
+        { z | composition =
                 { down = z.composition.down
                 , up =
                     Up
+                        { windowing = False }
                         { sequence = null.sequence
                         , variation = null.variation
-                        , windowing = False
                         , succ = z.composition.up
                         }
                 }
@@ -509,15 +464,14 @@ insert_up (CursorTree z) =
 
 
 insert_down : Map (CursorTree a)
-insert_down (CursorTree z) =
-    CursorTree
-        { z
-            | composition =
+insert_down (CursorTree parameters z) =
+    CursorTree parameters
+        { z | composition =
                 { down =
-                    Down
+                    Decided
+                        { windowing = False }
                         { sequence = null.sequence
                         , variation = null.variation
-                        , windowing = False
                         , succ = z.composition.down
                         }
                 , up = z.composition.up
@@ -526,10 +480,9 @@ insert_down (CursorTree z) =
 
 
 insert_before : a -> Map (CursorTree a)
-insert_before x (CursorTree z) =
-    CursorTree
-        { z
-            | sequence =
+insert_before x (CursorTree parameters z) =
+    CursorTree parameters
+        { z | sequence =
                 { before =
                     Next x
                         { down = Leaf
@@ -541,10 +494,9 @@ insert_before x (CursorTree z) =
 
 
 insert_after : a -> Map (CursorTree a)
-insert_after x (CursorTree z) =
-    CursorTree
-        { z
-            | sequence =
+insert_after x (CursorTree parameters z) =
+    CursorTree parameters
+        { z | sequence =
                 { before = z.sequence.before
                 , after =
                     Next x
@@ -556,10 +508,9 @@ insert_after x (CursorTree z) =
 
 
 insert_left : Map (CursorTree a)
-insert_left (CursorTree z) =
-    CursorTree
-        { z
-            | variation =
+insert_left (CursorTree parameters z) =
+    CursorTree parameters
+        { z | variation =
                 { left =
                     Variant
                         { down = Leaf
@@ -572,10 +523,9 @@ insert_left (CursorTree z) =
 
 
 insert_right : Map (CursorTree a)
-insert_right (CursorTree z) =
-    CursorTree
-        { z
-            | variation =
+insert_right (CursorTree parameters z) =
+    CursorTree parameters
+        { z | variation =
                 { left = z.variation.left
                 , right =
                     Variant
@@ -596,100 +546,149 @@ safe fu =
 -- Folding
 
 
-empty 
-    |> insert_before 3
-    |> insert_before 2
-    |> fold
-        \edge ->
-            case edge of
-                Before ( Next { sequence } ) ->
+type alias Fold edge node =
+    { compose :
+        { editing : Bool }
+            ->{ from_root : node, from_leaf : node, variation : node, sequence : node }
+            -> node
+    , from_leaf :
+        { leaf : node
+        , consider : { windowing : Bool } -> { possibilities : node } -> Map node
+        , cover : { windowing : Bool } -> { variation : node, sequence : node } -> Map node
+        }
+    , from_root :
+        { root : node
+        , cover : { windowing : Bool } -> { variation : node, sequence : node } -> Map node
+        }
+    , possibilities :
+        { initial : node
+        , onward : { sequence : node, from_leaf : node } -> Map node
+        }
+    , variation :
+        { fringe : node
+        , inward : { sequence : node, from_leaf : node } -> Map node
+        , center : { left : node, right : node } -> node
+        }
+    , sequence:
+        { fringe : node
+        , inward : { edge : edge, from_leaf : node } -> Map node
+        , center : { before : node, after : node } -> node
+        }
+    }
 
 
 
+{-| turns the CursorTree into a single node.
+Define functions to reduce each dimension from the fringe to the center.
+-}
 fold :
-    Fold a acc
-    -> CursorTree a 
-    -> acc
+    Fold edge node
+    -> CursorTree edge
+    -> node
+
+fold f ( CursorTree parameters z ) =
+    f.compose parameters
+        { from_root = fold_from_root f z.composition.up
+        , from_leaf = fold_from_leaf f z.composition.down
+        , variation = fold_variation f z.variation
+        , sequence = fold_sequence f z.sequence
+        }
 
 
-fold directive ( CursorTree z ) =
-    fold_sequence z.sequence directive.sequence
-        |> fold_variation z.variation directive.variation
-        |> fold_composition z.composition directive.composition
 
-fold_sequence : 
-    Sequence a -> 
-    Fold a acc
-    -> acc
-fold_sequence sequence directive  =
+
+        
+fold_sequence :  
+    Fold edge node ->
+    Sequence edge ->
+    node
+fold_sequence f sequence =
     let
-        fold_side : Next a -> acc
-        fold_side n =
-            case n of
-                Next a { down, Outside } ->
-                    directive.sequence.init
-                        |> fold_lower down directive
-                Next a { down, Next nn } ->
-                    fold_side (Next nn)
-                        |> fold_lower down directive
-                        |> directive.sequence.succ a
-
+        inward : Next edge -> node
+        inward edge =
+            case edge of
+                Outside ->
+                    f.sequence.fringe
+                Next a n ->
+                    f.sequence.inward
+                        { edge = a, from_leaf = fold_from_leaf f n.down }
+                        ( inward n.succ )
     in
-        merge
-            fold_side sequence.before
-            fold_side sequence.after
-
-
-fold_lower :
-    Down a ->
-    Fold a acc -> 
-    Map acc
-fold_lower lower directive =
+        f.sequence.center
+            { before = inward sequence.before, after = inward sequence.after}
+        
+        
+fold_variation :  
+    Fold edge node ->
+    Variation edge ->
+    node
+fold_variation f variation =
     let
-        fold_side : Down a -> acc
-        fold_side d =
-            case d of
-                Leaf ->
+        inward : Variant edge -> node
+        inward edge =
+            case edge of
+                Impossible ->
+                    f.variation.fringe
+                Variant v ->
+                    f.variation.inward
+                        { sequence = fold_sequence f v.sequence
+                        , from_leaf = fold_from_leaf f v.down }
+                        ( inward v.succ )
+    in
+        f.variation.center
+            { left = inward variation.left, right = inward variation.right }
+        
 
 
+fold_from_root :
+    Fold edge node -> 
+    Up edge ->
+    node
+fold_from_root f edge =
+    case edge of
+        Root ->
+            f.from_root.root
+        Up parameters { sequence, variation, succ } ->
+            f.from_root.cover parameters
+                { variation = fold_variation f variation, sequence = fold_sequence f sequence }
+                ( fold_from_root f succ )
+        
 
+fold_from_leaf :
+    Fold edge node -> 
+    Down edge ->
+    node
+fold_from_leaf f edge =
+    case edge of
+        Leaf ->
+            f.from_leaf.leaf
+        Undecided parameters possibilities ->
+            f.from_leaf.consider parameters
+                { possibilities = fold_possibilities f possibilities }
+                ( f.from_leaf.leaf )
+        Decided parameters { sequence, variation, succ } ->
+            f.from_leaf.cover parameters
+                { variation = fold_variation f variation, sequence = fold_sequence f sequence }
+                ( fold_from_leaf f succ )
+        
+fold_possibilities :
+    Fold edge node ->
+    Ambiguation ( Possibility edge ) ->
+    node
+fold_possibilities f =
+    let
+        fold_help : Possibility edge -> Map node
+        fold_help possibility =
+            f.possibilities.onward
+              { sequence = fold_sequence f possibility.sequence
+              , from_leaf = fold_from_leaf f possibility.succ
+              }
+    in
+        fold_ambiguation
+            fold_help
+            f.possibilities.initial
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            {--
 type alias Acc acc bcc =
     { branch : acc
     , merge : acc -> acc -> bcc
@@ -765,7 +764,7 @@ fold { compose, alternate, sequence } (CursorTree z) =
                 Up x ->
                     compose.before.accumulate (fold_upper x.up) (fold_variation alternate sequence x.variation)
 
-        fold_lower : Down a -> acc
+        fold_lower : Downa -> acc
         fold_lower lower =
             case lower of
                 Leaf ->
@@ -778,54 +777,62 @@ fold { compose, alternate, sequence } (CursorTree z) =
         (fold_upper s.up)
         (fold_variation alternate sequence z.variation)
         (fold_lower s.down)
-
+--}
 
 viewer : Fold String (Html msg)
 viewer =
     let
-        view_edge : String -> Html msg
-        view_edge str =
-            span [ class "edge" ] [ button [] [ text str ] ]
-
-        view_line : List String -> Html msg
-        view_line edges =
-            List.map view_edge edges
+      compose_ =
+        \parameters { from_root, from_leaf, variation, sequence } ->
+            div [ class "composed" ] [ from_root, variation, sequence, from_leaf ]
+      from_leaf_ =
+        { leaf = span [ class "from_leaf leaf" ] [ text "🍂" ]
+        , consider =
+              \parameters { possibilities } node ->
+                  div [ class "from_leaf consider" ] [ possibilities, node ]
+        , cover =
+              \parameters { variation , sequence } node ->
+                  div [ class "from_leaf cover" ] [ variation, sequence, node ]
+        }
+      from_root_ =
+        { root = span [ class "from_root" ] [ text "ROOT" ]
+        , cover =
+              \parameters { variation, sequence } node ->
+                  div [ class "from_root cover" ] [ node, variation, sequence ]
+        }
+      possibilities_ =
+        { initial = span [ class "possibilities" ] [ text "CHOOSE ONE:" ]
+        , onward =
+              \{ sequence, from_leaf } node ->
+                  div [ class "sequence" ] [ node, text "|", sequence, from_leaf ]
+        }
+      variation_ =
+        { fringe = span [ class "impossible fringe" ] [ text "-" ]
+        , inward =
+              \{ sequence, from_leaf } node ->
+                  button [ class "variants" ] [ text "..." ]
+        , center =
+              \sides ->
+                  div [ class "variation" ] [ sides.left, text "|||", sides.right ]
+        }
+      sequence_ =
+        { fringe = span [ class "outside fringe" ] [ text "[]" ]
+        , inward =
+              \{ edge, from_leaf } node ->
+                  div [ class "next" ] [ node, span [ class "edge" ] [ text edge ], from_leaf ]
+        , center =
+              \sides ->
+                  div [ class "sequence" ] [ sides.before, span [] [ text "<>" ], sides.after ]
+        }
     in
-    { compose =
-        { before =
-            { initial = [], accumulate = \acc a -> a :: acc }
-        , after =
-            { initial = acc, accumulate = \acc a -> acc ++ [ a ] }
-        , merge =
-            \upper a lower ->
-                div []
-                    List.map
-                    view_line
-                    (upper ++ [ a ] ++ lower)
-        }
-    , alternate =
-        { before =
-            { initial = 0, accumulate = \acc a -> acc + 1 }
-        , after =
-            { initial = 0, accumulate = \acc a -> acc + 1 }
-        , merge =
-            \left a right ->
-                if left + right > 0 then
-                    a ++ [ " (" ++ String.fromInt (left + right) ++ " variants" ]
-
-                else
-                    a
-        }
-    , sequence =
-        { before =
-            { initial = [], accumulate = \acc a -> a :: acc }
-        , after =
-            { initial = [], accumulate = \acc a -> acc ++ [ a ] }
-        , merge =
-            \before a after -> before ++ [ "->" ++ a ++ "<--" ] ++ after
-        }
-    }
-
+      Fold
+        compose_
+        from_leaf_
+        from_root_
+        possibilities_
+        variation_
+        sequence_
+    
 
 view : CursorTree String -> Html msg
 view =
@@ -839,16 +846,14 @@ side_by_side fi fu a =
 
 main =
     empty
-        |> insert_next 0
+        |> insert_after 0
         |> insert_down
         |> safe down
         |> insert_before 1
         |> insert_before 2
-        |> insert_next 4
+        |> insert_after 4
         |> insert_down
-        |> insert_next 3
+        |> insert_after 3
         |> safe after
         |> insert_down
-        |> side_by_side
-            (fold adder >> String.fromInt >> (\t -> div [ class "result" ] [ text t ]))
-            (map String.fromInt >> view)
+        |> map String.fromInt >> view
