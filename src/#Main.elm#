@@ -137,6 +137,7 @@ type Sequence x s
     
 type Tree a s
     = Leaf a
+    | Undecided ( Ambiguation ( Sequence ( Tree a s ) s ) ) 
     | Tree a
         { windowing : Bool }
         { down : Variation ( Sequence ( Tree a s ) s ) }
@@ -146,7 +147,7 @@ type Variation x s
     = Choice x
         ( Alternatives x s )
     | Undecided
-        ( Ambiguation x )
+        
 
 
 
